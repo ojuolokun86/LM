@@ -17,6 +17,20 @@ const allowedOrigins = [
   "https://techitoon.netlify.app"
 ];
 const app = express();
+
+// 👇 Add this fallback CORS middleware first
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (!origin || allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  }
+  next();
+});
+
+// 👇 Now your existing CORS setup
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -27,6 +41,9 @@ app.use(cors({
   },
   credentials: true
 }));
+
+
+
 
 const botServers = JSON.parse(fs.readFileSync(new URL('./config/botServers.json', import.meta.url), 'utf-8'));
 
