@@ -16,6 +16,7 @@ const allowedOrigins = [
   "http://127.0.0.1:3000",
   "https://techitoon.netlify.app"
 ];
+const app = express();
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -26,7 +27,6 @@ app.use(cors({
   },
   credentials: true
 }));
-
 
 const botServers = JSON.parse(fs.readFileSync(new URL('./config/botServers.json', import.meta.url), 'utf-8'));
 
