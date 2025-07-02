@@ -6,8 +6,8 @@ import { io as backendIO } from "socket.io-client";
 import fs from "fs";
 import supabase from './services/supabaseClient.js';
 import { forwardQrToClient, fetchUserBotInfo } from './utils.js';
-console.log("[LM] App.js loaded...");
 
+console.log("[LM] App.js loaded...");
 
 const allowedOrigins = [
   "http://localhost:8080",
@@ -16,9 +16,21 @@ const allowedOrigins = [
   "http://127.0.0.1:3000",
   "https://techitoon.netlify.app"
 ];
+
 const app = express();
 
-// 👇 Add this fallback CORS middleware first
+app.set('trust proxy', true); // 👈 Ensure correct IP forwarding behind proxies
+
+// ✅ FIRST: Allow all preflight OPTIONS
+app.options('*', (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  return res.sendStatus(200);
+});
+
+// ✅ THEN: Use custom middleware
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (!origin || allowedOrigins.includes(origin)) {
@@ -30,7 +42,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// 👇 Now your existing CORS setup
+// ✅ Now apply standard CORS
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -42,8 +54,38 @@ app.use(cors({
   credentials: true
 }));
 
+app.use(express.json());
 
+import apiRouter from './routes/api.js';
+app.use('/api', apiRouter);
 
+app.get('/ping', (req, res) => res.status(200).send('pong'));
+app.get('/health', (req, res) => res.status(200).send('OK'));
+
+const server = createServer(app);
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Load Manager running on port ${PORT}`);
+});
+
+// ✅ SOCKET.IO setup with CORS
+const io = new SocketIOServer(server, {
+  cors: {
+    origin: allowedOrigins,
+    credentials: true,
+    methods: ['GET', 'POST']
+  }
+});
+
+// ✅ WebSocket upgrade log
+server.on('upgrade', (req, socket, head) => {
+  console.log('Upgrading to WebSocket...');
+});
+
+// 🔌 SOCKET.IO EVENT HANDLERS
+export const authIdToClient = new Map();
+export const authIdToBackendSocket = new Map();
 
 const botServers = JSON.parse(fs.readFileSync(new URL('./config/botServers.json', import.meta.url), 'utf-8'));
 
@@ -57,7 +99,7 @@ async function getBackendUrl(data) {
       .select('server_id')
       .eq('phoneNumber', phoneNumber)
       .single();
-    if (session && session.server_id) {
+    if (session?.server_id) {
       const server = botServers.find(s => s.id === session.server_id);
       if (server) return server.url;
     }
@@ -70,7 +112,7 @@ async function getBackendUrl(data) {
       .eq('authId', authId)
       .limit(1)
       .single();
-    if (session && session.server_id) {
+    if (session?.server_id) {
       const server = botServers.find(s => s.id === session.server_id);
       if (server) return server.url;
     }
@@ -78,48 +120,6 @@ async function getBackendUrl(data) {
 
   return botServers[0].url;
 }
-import apiRouter from './routes/api.js';
-console.log(`[LM] Bot servers loaded: ${apiRouter} servers`);
-app.use(express.json());
-app.set('trust proxy', true);
-console.log(`[LM] Trust proxy set to true`);
-app.use('/api', apiRouter);
-
-app.get('/ping', (req, res) => {
-  res.status(200).send('pong');
-  console.log(`[LM] Ping received`);
-});
-
-
-
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
-});
-
-
-const server = createServer(app);
-server.on('upgrade', (req, socket, head) => {
-  console.log('Upgrading to WebSocket...');
-});
-
-const PORT = process.env.PORT || 3000
-console.log("PORT:", process.env.PORT);
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀Load Manager running on port ${PORT}`);
-});
-
-
-
-const io = new SocketIOServer(server, {
-  cors: {
-    origin: allowedOrigins,
-    credentials: true,
-  }
-});
-
-// Maps for tracking clients and backend sockets
-export const authIdToClient = new Map();
-export const authIdToBackendSocket = new Map();
 
 io.on('connection', (client) => {
   let backendSocket = null;
@@ -128,9 +128,7 @@ io.on('connection', (client) => {
   client.on('authId', async (authId) => {
     userAuthId = authId;
     authIdToClient.set(authId, client);
-    console.log(`🔗 [LoadManager] Client connected with authId: ${authId}`);
-
-    // Always send bot info from all healthy servers
+    console.log(`🔗 Client connected with authId: ${authId}`);
     const bots = await fetchUserBotInfo(authId);
     client.emit('bot-info', { bots });
   });
@@ -142,19 +140,20 @@ io.on('connection', (client) => {
   });
 
   client.onAny(async (event, ...args) => {
-    // Only create backend socket once per client
     if (!backendSocket) {
       const backendUrl = await getBackendUrl(args[0]);
-      backendSocket = backendIO(backendUrl, { transports: ['polling', 'websocket'] });
+      backendSocket = backendIO(backendUrl, {
+        transports: ['polling', 'websocket'],
+        withCredentials: true
+      });
       authIdToBackendSocket.set(client.id, backendSocket);
 
       backendSocket.on('connect', () => {
-        console.log(`[Proxy] Connected to backend bot server for client ${client.id}`);
+        console.log(`✅ Connected to backend bot for client ${client.id}`);
         if (userAuthId) backendSocket.emit('authId', userAuthId);
       });
 
       backendSocket.onAny((backendEvent, ...backendArgs) => {
-        //console.log(`[DEBUG] backendSocket event: ${backendEvent}`, backendArgs[0]);
         if (backendEvent === 'qr') {
           forwardQrToClient(backendArgs[0]);
         } else {
@@ -163,17 +162,17 @@ io.on('connection', (client) => {
       });
 
       backendSocket.on('disconnect', () => {
-        console.log(`[Proxy] Backend bot server disconnected for client ${client.id}`);
+        console.log(`⚠️ Backend bot disconnected for client ${client.id}`);
       });
     }
 
-    if (backendSocket && backendSocket.connected) {
+    if (backendSocket?.connected) {
       backendSocket.emit(event, ...args);
     }
   });
 
   client.on('disconnect', () => {
-    console.log('❌ [LoadManager] Socket.IO client disconnected:', client.id);
+    console.log(`❌ Client disconnected: ${client.id}`);
     if (backendSocket) {
       backendSocket.disconnect();
       authIdToBackendSocket.delete(client.id);
@@ -182,17 +181,16 @@ io.on('connection', (client) => {
   });
 });
 
-// Namespace for bot servers to connect to LM
+// ✅ /bot-server namespace for backend bots
 const botNamespace = io.of('/bot-server');
 
 botNamespace.on('connection', (socket) => {
-  console.log(`[LM] Bot server connected: ${socket.id}`);
+  console.log(`🤖 Bot server connected: ${socket.id}`);
 
   socket.on('qr', (qrPayload) => {
-    // Forward QR to the correct frontend client
     forwardQrToClient(qrPayload);
-    console.log(`[LM] QR received from bot server and forwarded:`, qrPayload);
+    console.log(`📲 Forwarded QR from bot:`, qrPayload);
   });
 
-  // You can add more event handlers as needed (e.g., status, metrics, etc.)
+  // More handlers can go here
 });
