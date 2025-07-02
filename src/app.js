@@ -16,7 +16,7 @@ const allowedOrigins = [
   "http://127.0.0.1:3000",
   "https://techitoon.netlify.app"
 ];
-capp.use(cors({
+app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
